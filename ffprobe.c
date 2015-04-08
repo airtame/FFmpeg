@@ -1703,6 +1703,64 @@ static void show_packet(WriterContext *w, AVFormatContext *fmt_ctx, AVPacket *pk
     AVBPrint pbuf;
     const char *s;
 
+// XXX: hack to get the right bitstream audio and video data:
+#define ELIS_DUMP_RAW_BS (1)
+#if ELIS_DUMP_RAW_BS
+    static long long audio_bs_file_pos = 0;
+    static long long video_bs_file_pos = 0;
+    static int written_extra = 0;
+    static FILE *audio_bs_file = NULL;
+    static FILE *video_bs_file = NULL;
+
+    if (audio_bs_file == NULL) {
+        char *audio_bs_file_name = (char *) calloc(strlen(input_filename) + 5, 1);
+        strcat(audio_bs_file_name, input_filename);
+        strcat(audio_bs_file_name, ".abs");
+        audio_bs_file = fopen(audio_bs_file_name, "wb");
+        av_log(NULL, AV_LOG_VERBOSE, "\nCreating audio bitstream %s", audio_bs_file_name);
+    }
+
+    if (video_bs_file == NULL) {
+        char *video_bs_file_name = (char *) calloc(strlen(input_filename) + 5, 1);
+        strcat(video_bs_file_name, input_filename);
+        strcat(video_bs_file_name, ".vbs");
+        video_bs_file = fopen(video_bs_file_name, "wb");
+        av_log(NULL, AV_LOG_VERBOSE, "\nCreating audio bitstream %s", video_bs_file_name);
+    }
+
+    if (!written_extra && st->codec->codec_type ==  AVMEDIA_TYPE_VIDEO) {
+        // write SPS and PPS
+        av_log(NULL, AV_LOG_VERBOSE, "\nWriting %d of  extradata for codec type %d\n",
+                st->codec->extradata_size, st->codec->codec_type);
+        written_extra = 1;
+        av_bprint_init(&pbuf, 1, AV_BPRINT_SIZE_UNLIMITED);
+        writer_print_section_header(w, SECTION_ID_PACKET);
+
+        s = av_get_media_type_string(st->codec->codec_type);
+        if (s) print_str    ("codec_type", s);
+        else   print_str_opt("codec_type", "unknown");
+        print_int("stream_index",     pkt->stream_index);
+        print_ts  ("pts",             0);
+        print_time("pts_time",        0, &st->time_base);
+        int size = st->codec->extradata_size;
+        uint8_t *data = (uint8_t *) malloc(size);
+
+        memcpy(data, st->codec->extradata, st->codec->extradata_size);
+        print_val("size", size, unit_byte_str);
+        data[0] = 0x00;
+        data[1] = 0x00;
+        data[2] = 0x00;
+        data[3] = 0x01;
+        fwrite(data, 1, size, video_bs_file);
+        print_fmt    ("pos", "%"PRId64, video_bs_file_pos);
+        video_bs_file_pos += size;
+
+        writer_print_section_footer(w);
+        av_bprint_finalize(&pbuf, NULL);
+        fflush(stdout);
+    }
+#endif
+
     av_bprint_init(&pbuf, 1, AV_BPRINT_SIZE_UNLIMITED);
 
     writer_print_section_header(w, SECTION_ID_PACKET);
@@ -1720,11 +1778,43 @@ static void show_packet(WriterContext *w, AVFormatContext *fmt_ctx, AVPacket *pk
     print_duration_ts("convergence_duration", pkt->convergence_duration);
     print_duration_time("convergence_duration_time", pkt->convergence_duration, &st->time_base);
     print_val("size",             pkt->size, unit_byte_str);
+#if !ELIS_DUMP_RAW_BS
     if (pkt->pos != -1) print_fmt    ("pos", "%"PRId64, pkt->pos);
     else                print_str_opt("pos", "N/A");
+#else
+    if (st->codec->codec_type ==  AVMEDIA_TYPE_VIDEO) {
+#if 0
+        char *nal_data = malloc(pkt->size + 3);
+        nal_data[0] = 0x00;
+        nal_data[1] = 0x00;
+        nal_data[2] = 0x01;
+        memcpy(nal_data + 3, pkt->data, pkt->size);
+        fwrite(nal_data, 1, pkt->size + 3, video_bs_file);
+        print_fmt    ("pos", "%"PRId64, video_bs_file_pos);
+        video_bs_file_pos += pkt->size + 3;
+        free(nal_data);
+#elif 0
+        fwrite(pkt->data, 1, pkt->size, video_bs_file);
+        print_fmt    ("pos", "%"PRId64, video_bs_file_pos);
+        video_bs_file_pos += pkt->size;
+#else
+        pkt->data[0] = 0x00;
+        pkt->data[1] = 0x00;
+        pkt->data[2] = 0x00;
+        pkt->data[3] = 0x01;
+        fwrite(pkt->data, 1, pkt->size, video_bs_file);
+        print_fmt    ("pos", "%"PRId64, video_bs_file_pos);
+        video_bs_file_pos += pkt->size;
+#endif
+    } else if (st->codec->codec_type ==  AVMEDIA_TYPE_AUDIO) {
+        fwrite(pkt->data, 1, pkt->size, audio_bs_file);
+        print_fmt    ("pos", "%"PRId64, audio_bs_file_pos);
+        audio_bs_file_pos += pkt->size;
+    }
+#endif
     print_fmt("flags", "%c",      pkt->flags & AV_PKT_FLAG_KEY ? 'K' : '_');
     if (do_show_data)
-        writer_print_data(w, "data", pkt->data, pkt->size);
+        writer_print_data(w, "data-elis", pkt->data, pkt->size);
     writer_print_data_hash(w, "data_hash", pkt->data, pkt->size);
     writer_print_section_footer(w);
 
